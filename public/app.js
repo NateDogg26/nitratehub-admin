@@ -94,10 +94,15 @@ $('#push-form').onsubmit=async(e)=>{
     if(dialog.returnValue!=='send')return;
     $('#review-push').disabled=true;
     try {
-      const result=await api('/api/push',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify(request)});
+      const result={total:0,accepted:0,failed:0,unknown:0};
+      for(let i=0;i<request.deviceIds.length;i+=40){
+        const batch=await api('/api/push',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({...request,deviceIds:request.deviceIds.slice(i,i+40)})});
+        for(const key of ['total','accepted','failed','unknown'])result[key]+=batch[key];
+        notice(`Processing notification: ${Math.min(i+40,request.deviceIds.length)} / ${request.deviceIds.length} devices. Keep this page open.`);
+      }
       notice(`APNs accepted ${result.accepted} of ${result.total}. Failed: ${result.failed}. Unknown: ${result.unknown}. Acceptance does not confirm device delivery.`);
       data=await api('/api/overview');render();location.hash='history';
-    }catch(err){notice(err.message);}finally{audienceCount();}
+    }catch(err){notice(err.message+' Sending stopped. Some earlier batches may have been sent. Check the activity log before trying again.');}finally{audienceCount();}
   };
 };
 (async()=>{

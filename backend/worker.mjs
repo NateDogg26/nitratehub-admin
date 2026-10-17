@@ -60,15 +60,27 @@ async function overview(env){
   ]);
   return json({apps:apps.results,devices:devices.results,history:history.results,daily:daily.results,accepted7d:count.count});
 }
-let cachedAPNs;
+const apnsCache = new Map();
+function apnsCredentials(env,appId,environment){
+  if(env.APNS_CREDENTIALS){
+    let profiles;try{profiles=JSON.parse(env.APNS_CREDENTIALS);}catch{fail('APNs credential configuration is invalid',503);}
+    const selected=profiles[appId]?.[environment] || profiles[environment];
+    if(!selected)fail('No APNs key is configured for this app and environment',503);
+    return {APNS_KEY_ID:selected.keyId,APNS_TEAM_ID:selected.teamId,APNS_PRIVATE_KEY:selected.privateKey};
+  }
+  return env;
+}
+
 async function apnsJWT(env){
   const cacheKey=env.APNS_KEY_ID+env.APNS_TEAM_ID+env.APNS_PRIVATE_KEY;
-  if(cachedAPNs?.key===cacheKey&&cachedAPNs.expires>Date.now())return cachedAPNs.jwt;
+  const cached=apnsCache.get(cacheKey);
+  if(cached&&cached.expires>Date.now())return cached.jwt;
   const der=Uint8Array.from(atob(env.APNS_PRIVATE_KEY.replace(/-----[^-]+-----/g,'').replace(/\s/g,'')),c=>c.charCodeAt(0));
   const key=await crypto.subtle.importKey('pkcs8',der,{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
   const input=encode({alg:'ES256',kid:env.APNS_KEY_ID})+'.'+encode({iss:env.APNS_TEAM_ID,iat:Math.floor(Date.now()/1000)});
   const jwt=input+'.'+b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},key,encoder.encode(input)));
-  cachedAPNs={key:cacheKey,jwt,expires:Date.now()+3000000};return jwt;
+  if(apnsCache.size>20)apnsCache.clear();
+  apnsCache.set(cacheKey,{jwt,expires:Date.now()+3000000});return jwt;
 }
 async function sendOne(env,device,app,payload,jwt,id){
   let status='unknown',reason='Network response unavailable';
@@ -82,7 +94,8 @@ async function sendOne(env,device,app,payload,jwt,id){
 }
 async function push(request,env){
   const input=validatePush(await body(request));
-  if(!env.APNS_KEY_ID||!env.APNS_TEAM_ID||!env.APNS_PRIVATE_KEY)fail('APNs credentials have not been configured',503);
+  const credentials=apnsCredentials(env,input.appId,input.environment);
+  if(!credentials.APNS_KEY_ID||!credentials.APNS_TEAM_ID||!credentials.APNS_PRIVATE_KEY)fail('APNs credentials have not been configured',503);
   const id=request.headers.get('Idempotency-Key');if(!id||!/^[0-9a-f-]{36}$/.test(id))fail('A UUID Idempotency-Key is required');
   const prior=await env.DB.prepare('SELECT * FROM sends WHERE id=?').bind(id).first();if(prior)return json(prior);
   const app=await env.DB.prepare('SELECT * FROM apps WHERE id=?').bind(input.appId).first();
@@ -93,8 +106,8 @@ async function push(request,env){
   const devices=rows.results.filter(d=>selected.has(d.id)&&(input.audience!=='mine'||d.mine));
   if(!devices.length)fail('No eligible devices selected');
   if(devices.length!==selected.size)fail('Device audience changed. Refresh and review it again.',409);
-  if(devices.length>500)fail('Send at most 500 devices per batch');
-  const jwt=await apnsJWT(env); // Validate credentials before recording a send.
+  if(devices.length>40)fail('Send at most 40 devices per batch');
+  const jwt=await apnsJWT(credentials); // Validate credentials before recording a send.
   try{
     await env.DB.batch([
       env.DB.prepare('INSERT INTO sends(id,app_id,title,audience,total,created_at) VALUES(?,?,?,?,?,?)').bind(id,app.id,input.title,input.audience,devices.length,new Date().toISOString()),
@@ -102,7 +115,7 @@ async function push(request,env){
     ]);
   }catch(error){const existing=await env.DB.prepare('SELECT * FROM sends WHERE id=?').bind(id).first();if(existing)return json(existing);throw error;}
   const counts={accepted:0,failed:0,unknown:0};
-  for(let i=0;i<devices.length;i+=10){const statuses=await Promise.all(devices.slice(i,i+10).map(d=>sendOne(env,d,app,input.payload,jwt,id)));for(const s of statuses)counts[s]++;}
+  for(let i=0;i<devices.length;i+=5){const statuses=await Promise.all(devices.slice(i,i+5).map(d=>sendOne(env,d,app,input.payload,jwt,id)));for(const s of statuses)counts[s]++;}
   await env.DB.prepare('UPDATE sends SET accepted=?,failed=?,unknown=?,status=? WHERE id=?').bind(counts.accepted,counts.failed,counts.unknown,counts.unknown?'incomplete':'completed',id).run();
   return json({id,total:devices.length,...counts});
 }
@@ -122,7 +135,7 @@ async function ingest(request,env){
 }
 async function handle(request,env){
   const path=new URL(request.url).pathname;
-  if(path==='/health')return json({ok:true,authConfigured:Boolean(env.DISCORD_CLIENT_ID&&env.DISCORD_CLIENT_SECRET),pushConfigured:Boolean(env.APNS_KEY_ID&&env.APNS_TEAM_ID&&env.APNS_PRIVATE_KEY)});
+  if(path==='/health')return json({ok:true,authConfigured:Boolean(env.DISCORD_CLIENT_ID&&env.DISCORD_CLIENT_SECRET),pushConfigured:Boolean(env.APNS_CREDENTIALS||(env.APNS_KEY_ID&&env.APNS_TEAM_ID&&env.APNS_PRIVATE_KEY))});
   if(path==='/ingest'&&request.method==='POST')return ingest(request,env);
   if(request.method==='GET'&&['/auth/discord','/auth/callback'].includes(path))return oauth(request,env,path);
   if(request.method!=='GET'&&request.headers.get('Origin')!==env.FRONTEND_ORIGIN)fail('Permission denied',403);

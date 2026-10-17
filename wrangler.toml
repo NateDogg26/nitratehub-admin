@@ -7,12 +7,17 @@ workers_dev = true
 FRONTEND_ORIGIN = "https://admin.nitratehub.xyz"
 API_ORIGIN = "https://admin-api.nitratehub.xyz"
 OWNER_DISCORD_ID = "933806891786731640"
+DISCORD_CLIENT_ID = "1561145016435474495"
 
-# Set the real D1 database ID after creating it. Do not deploy with this placeholder.
+# Production D1 binding.
 [[d1_databases]]
 binding = "DB"
 database_name = "nitratehub-admin"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "4f123d12-ecef-4d86-9619-951168450792"
 
 [triggers]
 crons = ["0 3 * * *"]
+
+[[routes]]
+pattern = "admin-api.nitratehub.xyz"
+custom_domain = true

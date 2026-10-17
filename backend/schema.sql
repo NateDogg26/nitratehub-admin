@@ -19,5 +19,5 @@ INSERT OR IGNORE INTO apps(id,name,bundle_id,platform,color) VALUES
 ('suuboard','SuuBoard','xyz.nitratehub.SuuBoard','iOS','#e3d69c'),
 ('glasssnake','GlassSnake','com.nathanburgess.GlassSnake','iOS','#a6d8e1'),
 ('latency','Latency','com.hondo.Latency','iOS','#bdbecb'),
-('ctos','ctOS','VERIFY_BEFORE_ENABLING','iOS','#b6c4d0'),
+('ctos','ctOS','com.ctos.monitor','iOS','#b6c4d0'),
 ('the-vault','The Vault','','Web','#c8bd9d');
