@@ -1,0 +1,18 @@
+name = "nitratehub-admin-api"
+main = "backend/worker.mjs"
+compatibility_date = "2026-10-17"
+workers_dev = true
+
+[vars]
+FRONTEND_ORIGIN = "https://admin.nitratehub.xyz"
+API_ORIGIN = "https://admin-api.nitratehub.xyz"
+OWNER_DISCORD_ID = "933806891786731640"
+
+# Set the real D1 database ID after creating it. Do not deploy with this placeholder.
+[[d1_databases]]
+binding = "DB"
+database_name = "nitratehub-admin"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[triggers]
+crons = ["0 3 * * *"]
