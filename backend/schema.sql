@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS deliveries(send_id TEXT NOT NULL REFERENCES sends(id)
 INSERT OR IGNORE INTO apps(id,name,bundle_id,platform,color) VALUES
 ('neighbourhood','Neighbourhood','com.nathanburgess.Neighbourhood','iOS / Android','#d3e6ae'),
 ('keyra','Keyra','xyz.nitratehub.keyra','iOS','#c4b5f4'),
-('revyn','REVYN','VERIFY_BEFORE_ENABLING','iOS','#b9cbed'),
+('revyn','REVYN','com.nathanburgess.revyn','iOS','#b9cbed'),
 ('hondodvr','HondoDVR','com.nathanburgess.HondoDVR','iOS','#eeb98b'),
 ('keeper','Keeper','com.nathanburgess.Keeper','iOS','#a8cfbf'),
 ('detailflow','DetailFlow','com.nathanburgess.DetailFlow','iOS','#dab9d4'),

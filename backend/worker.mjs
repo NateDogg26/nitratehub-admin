@@ -58,7 +58,8 @@ async function overview(env){
     env.DB.prepare('SELECT * FROM sends ORDER BY created_at DESC LIMIT 100').all(),
     env.DB.prepare("SELECT COALESCE(SUM(accepted),0) AS count FROM sends WHERE julianday(created_at)>=julianday('now','-7 days')").first()
   ]);
-  return json({apps:apps.results,devices:devices.results,history:history.results,daily:daily.results,accepted7d:count.count});
+  const catalogue=apps.results.map(app=>({...app,pushEnvironments:['development','production'].filter(environment=>{try{const credentials=apnsCredentials(env,app.id,environment);return Boolean(credentials.APNS_KEY_ID&&credentials.APNS_TEAM_ID&&credentials.APNS_PRIVATE_KEY);}catch{return false;}})}));
+  return json({apps:catalogue,devices:devices.results,history:history.results,daily:daily.results,accepted7d:count.count});
 }
 const apnsCache = new Map();
 function apnsCredentials(env,appId,environment){
@@ -119,17 +120,28 @@ async function push(request,env){
   await env.DB.prepare('UPDATE sends SET accepted=?,failed=?,unknown=?,status=? WHERE id=?').bind(counts.accepted,counts.failed,counts.unknown,counts.unknown?'incomplete':'completed',id).run();
   return json({id,total:devices.length,...counts});
 }
+function trustedTimestamp(value){
+  if(value===undefined)return new Date().toISOString();
+  if(typeof value!=='string'||!Number.isFinite(Date.parse(value))||Date.parse(value)>Date.now()+300000)fail('Invalid activity timestamp');
+  return new Date(value).toISOString();
+}
 async function ingest(request,env){
   // Server-to-server only. Never embed this key in a mobile application.
   if(!env.INGEST_SECRET||request.headers.get('Authorization')!=='Bearer '+env.INGEST_SECRET)fail('Permission denied',403);
   const input=await body(request);const app=await env.DB.prepare('SELECT id FROM apps WHERE id=?').bind(input.appId||'').first();if(!app)fail('Unknown app');
-  if(input.type==='device'){
-    if(typeof input.token!=='string'||!/^([a-f0-9]{2}){16,128}$/i.test(input.token)||!['development','production'].includes(input.environment)||typeof input.model!=='string'||input.model.length>80)fail('Invalid device');
+  if(input.type==='deviceRemoved'){
+    if(typeof input.id!=='string'||input.id.length>100)fail('Invalid device ID');
+    await env.DB.prepare('UPDATE devices SET enabled=0 WHERE id=? AND app_id=?').bind(input.id,app.id).run();
+  }else if(input.type==='status'){
+    // A successful authoritative backend sync may contain zero devices.
+  }else if(input.type==='device'){
+    if(typeof input.token!=='string'||!/^([a-f0-9]{2}){16,256}$/i.test(input.token)||!['development','production'].includes(input.environment)||typeof input.model!=='string'||input.model.length>80)fail('Invalid device');
     const id=await digest(app.id+':'+input.environment+':'+input.token.toLowerCase());
-    await env.DB.prepare('INSERT INTO devices(id,app_id,token,environment,model,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(app_id,token,environment) DO UPDATE SET model=excluded.model,last_seen=excluded.last_seen,enabled=1').bind(id,app.id,input.token.toLowerCase(),input.environment,input.model,new Date().toISOString()).run();
+    const lastSeenAt=trustedTimestamp(input.lastSeenAt);
+    await env.DB.prepare('INSERT INTO devices(id,app_id,token,environment,model,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(app_id,token,environment) DO UPDATE SET model=excluded.model,last_seen=excluded.last_seen,enabled=CASE WHEN ? THEN 1 ELSE devices.enabled END').bind(id,app.id,input.token.toLowerCase(),input.environment,input.model,lastSeenAt,input.reactivate===true?1:0).run();
   }else if(input.type==='event'){
     if(typeof input.id!=='string'||input.id.length>100||!input.id||typeof input.installationId!=='string'||!input.installationId||input.installationId.length>100||typeof input.name!=='string'||!input.name||input.name.length>80)fail('Invalid event');
-    await env.DB.prepare('INSERT OR IGNORE INTO events(id,app_id,installation_id,name,created_at) VALUES(?,?,?,?,?)').bind(app.id+':'+input.id,app.id,input.installationId,input.name,new Date().toISOString()).run();
+    await env.DB.prepare('INSERT OR IGNORE INTO events(id,app_id,installation_id,name,created_at) VALUES(?,?,?,?,?)').bind(app.id+':'+input.id,app.id,input.installationId,input.name,trustedTimestamp(input.occurredAt)).run();
   }else fail('Invalid ingestion type');
   await env.DB.prepare('UPDATE apps SET connected=1 WHERE id=?').bind(app.id).run();return json({ok:true});
 }

@@ -1,6 +1,7 @@
 const $ = (s) => document.querySelector(s);
 let data = { apps: [], devices: [], history: [], daily: [] };
 let ready = false;
+let sending = false;
 const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const date = s => s ? new Date(s).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}) : 'Never';
 const apiBase = window.NITRATE_CONFIG.api;
@@ -33,13 +34,18 @@ function renderApps() {
 function eligibleDevices() { return data.devices.filter(d=>d.app_id===$('#push-app').value && d.environment===$('#push-environment').value && d.enabled); }
 function targets() { const all = eligibleDevices(); const audience = $('#push-audience').value; return all.filter(d=>audience==='all' || (audience==='mine' ? d.mine : document.querySelector(`[data-target="${CSS.escape(d.id)}"]`)?.checked)); }
 function updateAudience() {
+  const app=data.apps.find(a=>a.id===$('#push-app').value);
+  if(app?.pushEnvironments){
+    for(const option of $('#push-environment').options)option.disabled=!app.pushEnvironments.includes(option.value);
+    if(!app.pushEnvironments.includes($('#push-environment').value)&&app.pushEnvironments.length)$('#push-environment').value=app.pushEnvironments[0];
+  }
   const selected = new Set([...document.querySelectorAll('[data-target]:checked')].map(x=>x.dataset.target));
   $('#push-devices').hidden = $('#push-audience').value !== 'selected';
   $('#push-devices').innerHTML = eligibleDevices().map(d=>`<label><input type="checkbox" data-target="${escapeHTML(d.id)}" ${selected.has(d.id)?'checked':''}> ${escapeHTML(d.label || d.model || 'Unnamed device')} ${d.mine?'· yours':''}</label>`).join('') || '<span class="muted">No devices in this environment.</span>';
   document.querySelectorAll('[data-target]').forEach(x=>x.onchange=audienceCount);
   audienceCount();
 }
-function audienceCount() { const count = targets().length; $('#audience-count').textContent = `${count} eligible device${count===1?'':'s'} · ${$('#push-environment').selectedOptions[0].text}`; $('#review-push').disabled = !count; }
+function audienceCount() { const count = targets().length; $('#audience-count').textContent = `${count} eligible device${count===1?'':'s'} · ${$('#push-environment').selectedOptions[0].text}`; const app=data.apps.find(a=>a.id===$('#push-app').value); const configured=!app?.pushEnvironments||app.pushEnvironments.includes($('#push-environment').value); if(!configured)$('#audience-count').textContent+=' · Signing key not configured'; $('#review-push').disabled = !count || !configured || sending; }
 function preview() {
   const app = data.apps.find(a=>a.id===$('#push-app').value);
   $('#preview-app').textContent=app?.name.toUpperCase() || 'APPLICATION';
@@ -84,6 +90,7 @@ $('#device-app').onchange=renderDevices; $('#device-group').onchange=renderDevic
 ['push-title','push-body'].forEach(id=>$('#'+id).oninput=preview);
 $('#push-form').onsubmit=async(e)=>{
   e.preventDefault();
+  if(sending)return;
   const chosen = targets(); if(!chosen.length)return;
   const request={appId:$('#push-app').value,environment:$('#push-environment').value,audience:$('#push-audience').value,deviceIds:chosen.map(d=>d.id),title:$('#push-title').value.trim(),body:$('#push-body').value.trim(),sound:$('#push-sound').checked};
   if(!request.title || !request.body)return;
@@ -92,6 +99,7 @@ $('#push-form').onsubmit=async(e)=>{
   const dialog=$('#confirm'); dialog.returnValue='cancel'; dialog.showModal();
   dialog.onclose=async()=>{
     if(dialog.returnValue!=='send')return;
+    sending=true;
     $('#review-push').disabled=true;
     try {
       const result={total:0,accepted:0,failed:0,unknown:0};
@@ -102,7 +110,7 @@ $('#push-form').onsubmit=async(e)=>{
       }
       notice(`APNs accepted ${result.accepted} of ${result.total}. Failed: ${result.failed}. Unknown: ${result.unknown}. Acceptance does not confirm device delivery.`);
       data=await api('/api/overview');render();location.hash='history';
-    }catch(err){notice(err.message+' Sending stopped. Some earlier batches may have been sent. Check the activity log before trying again.');}finally{audienceCount();}
+    }catch(err){notice(err.message+' Sending stopped. Some earlier batches may have been sent. Check the activity log before trying again.');}finally{sending=false;audienceCount();}
   };
 };
 (async()=>{

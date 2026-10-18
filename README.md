@@ -45,3 +45,11 @@ Use Node 22+ and `pnpm install`; `pnpm test` checks authorization and payload bo
 For environment-specific or app-specific keys, set the **secret** `APNS_CREDENTIALS` to JSON. Never commit its contents. Each entry contains `keyId`, `teamId`, `privateKey` (full `.p8` PEM). Top-level `development` and `production` entries are team defaults. An app ID such as `neighbourhood` may contain its own `development` / `production` entries to override those defaults. When this secret is present, missing profiles fail closed; the legacy three `APNS_*` secrets are not used. This supports separate sandbox/production keys and different developer teams.
 
 The browser splits large reviewed audiences into batches of 40 to respect the Workers Free outbound request limit. Keep the page open while sending; completed batches are independently audited. If sending stops, review the activity log before trying again.
+
+## VPS bridge
+
+`infrastructure/bridge.py` reads Keyra via SQLite `mode=ro` / `query_only` and Neighbourhood via a read-only PostgreSQL transaction. The companion systemd timer runs every five minutes with filesystem write access restricted to its checkpoint directory. It forwards APNs registrations and pseudonymous activity timestamps; account credentials, vault contents, email addresses, messages and location are not forwarded. Decryption keys remain on the VPS. Revoked, removed, and expired-session registrations become ineligible after a successful sync.
+
+The bridge samples backend last-seen timestamps; graph counts are activity samples, **not total app opens**. It preserves historical times and does not count imports as new activity. Apps without an existing data integration remain explicitly disconnected. The first bridge version supports Keyra and Neighbourhood; other catalogue entries need app-specific integrations.
+
+The Mac SSH alias is `nitratehub-vps`, using `~/.ssh/id_ed25519_nitratehub`. Password login was not disabled.

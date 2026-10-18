@@ -1,0 +1,21 @@
+[Unit]
+Description=NitrateHub read-only app analytics and device bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=neighbourhood-api
+ExecStart=/opt/neighbourhood/.venv/bin/python /opt/nitratehub-bridge/bridge.py
+EnvironmentFile=/etc/neighbourhood/backend.env
+EnvironmentFile=/etc/nitratehub-bridge.env
+StateDirectory=nitratehub-bridge
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/nitratehub-bridge
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+TimeoutStartSec=240
