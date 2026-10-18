@@ -21,3 +21,10 @@ crons = ["0 3 * * *"]
 [[routes]]
 pattern = "admin-api.nitratehub.xyz"
 custom_domain = true
+
+[[ratelimits]]
+name = "CLIENT_REGISTRATION_LIMITER"
+namespace_id = "933806891"
+[ratelimits.simple]
+limit = 30
+period = 60

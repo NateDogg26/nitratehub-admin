@@ -27,7 +27,7 @@ def keyra():
  db=sqlite3.connect('file:/home/keyra/data/keyra.db?mode=ro',uri=True,timeout=10);db.row_factory=sqlite3.Row;db.execute('PRAGMA query_only=ON')
  rows=[dict(r) for r in db.execute('SELECT id,model,name,push_token,last_seen FROM devices WHERE revoked_at IS NULL')];db.close()
  environment='production' if config.get('APNS_ENV')=='production' else 'development'
- return [{'id':opaque('keyra:'+r['id']),'model':(r['model'] or 'Apple device')[:80],'token':r['push_token'] or '', 'environment':environment,'seen':r['last_seen']} for r in rows]
+ return [{'id':opaque('keyra:'+r['id']),'model':(r['model'] or 'Apple device')[:80],'deviceName':(r['name'] or '')[:100],'sourceIdentifier':str(r['id']),'token':r['push_token'] or '', 'environment':environment,'seen':r['last_seen']} for r in rows]
 
 def neighbourhood():
  config=os.environ
@@ -38,7 +38,7 @@ def neighbourhood():
  crypto.configure()
  with psycopg.connect(config['DATABASE_URL'],row_factory=dict_row,options='-c default_transaction_read_only=on -c statement_timeout=10000') as db:
   rows=db.execute("SELECT d.id,d.device_name,d.token_cipher,d.environment,d.last_seen_at FROM devices d JOIN sessions s ON s.token=d.session_token WHERE d.platform='ios' AND d.enabled=TRUE AND s.expires>%s",(time.time(),)).fetchall()
- return [{'id':opaque('neighbourhood:'+r['id']),'model':'Apple device','token':crypto.reveal('devices',r['id'],'token',r['token_cipher']),'environment':r['environment'],'seen':r['last_seen_at']} for r in rows]
+ return [{'id':opaque('neighbourhood:'+r['id']),'model':'Apple device','deviceName':(r['device_name'] or '')[:100],'sourceIdentifier':str(r['id']),'token':crypto.reveal('devices',r['id'],'token',r['token_cipher']),'environment':r['environment'],'seen':r['last_seen_at']} for r in rows]
 
 def device_id(app,row):return base64.urlsafe_b64encode(hashlib.sha256((app+':'+row['environment']+':'+row['token'].lower()).encode()).digest()).decode().rstrip('=')
 
@@ -50,10 +50,15 @@ def sync(app,rows,prior):
   if seen>=time.time()-90*86400 and previous.get('events',{}).get(row['id'])!=event_id:
    post({'type':'event','appId':app,'id':event_id,'installationId':row['id'],'name':'backend_activity','occurredAt':stamp(seen)})
   if row['token']:
-   identifier=device_id(app,row);current[identifier]={'seen':seen,'id':identifier}
-   if previous.get('devices',{}).get(identifier,{}).get('seen')!=seen:
-    post({'type':'device','appId':app,'token':row['token'],'environment':row['environment'],'model':row['model'],'lastSeenAt':stamp(seen),'reactivate':identifier not in previous.get('devices',{})})
- for removed in set(previous.get('devices',{}))-set(current):post({'type':'deviceRemoved','appId':app,'id':removed})
+   identifier=device_id(app,row);current[identifier]={'seen':seen,'id':identifier,'metadata':opaque(row['model']+row['deviceName']+row['sourceIdentifier']),'sourceIdentifier':row['sourceIdentifier'],'environment':row['environment']}
+   if previous.get('devices',{}).get(identifier,{})!=current[identifier]:
+    post({'type':'device','appId':app,'token':row['token'],'environment':row['environment'],'model':row['model'],'deviceName':row['deviceName'],'sourceIdentifier':row['sourceIdentifier'],'lastSeenAt':stamp(seen),'reactivate':identifier not in previous.get('devices',{})})
+ for removed in set(previous.get('devices',{}))-set(current):
+  old=previous['devices'][removed]
+  if old.get('sourceIdentifier'):
+   if any(d.get('sourceIdentifier')==old['sourceIdentifier'] and d.get('environment')==old['environment'] for d in current.values()):continue
+   post({'type':'deviceRemoved','appId':app,'sourceIdentifier':old['sourceIdentifier'],'environment':old['environment']})
+  else:post({'type':'deviceRemoved','appId':app,'id':removed})
  post({'type':'status','appId':app})
  prior[app]={'devices':current,'events':{r['id']:r['id']+':'+str(int(float(r['seen']))) for r in rows}}
  print(app+': synced '+str(len(rows))+' installations, '+str(len(current))+' push registrations',flush=True)

@@ -31,6 +31,15 @@ function renderApps() {
   $('#overview-apps').innerHTML = data.apps.slice(0,6).map(appCard).join('');
   document.querySelectorAll('[data-compose]').forEach(b=>b.onclick=()=> { $('#push-app').value=b.dataset.compose; updateAudience(); preview(); location.hash='push'; });
 }
+function deviceMake(d) {
+  const raw=d.model || '';
+  if(/^iPhone/i.test(raw))return 'Apple iPhone';
+  if(/^iPad/i.test(raw))return 'Apple iPad';
+  if(/^iPod/i.test(raw))return 'Apple iPod touch';
+  return raw || 'Apple device';
+}
+function deviceTitle(d) {return d.label || d.device_name || deviceMake(d);}
+function shortDeviceId(d) {return (d.source_identifier || d.id).slice(-8);}
 function eligibleDevices() { return data.devices.filter(d=>d.app_id===$('#push-app').value && d.environment===$('#push-environment').value && d.enabled); }
 function targets() { const all = eligibleDevices(); const audience = $('#push-audience').value; return all.filter(d=>audience==='all' || (audience==='mine' ? d.mine : document.querySelector(`[data-target="${CSS.escape(d.id)}"]`)?.checked)); }
 function updateAudience() {
@@ -41,7 +50,7 @@ function updateAudience() {
   }
   const selected = new Set([...document.querySelectorAll('[data-target]:checked')].map(x=>x.dataset.target));
   $('#push-devices').hidden = $('#push-audience').value !== 'selected';
-  $('#push-devices').innerHTML = eligibleDevices().map(d=>`<label><input type="checkbox" data-target="${escapeHTML(d.id)}" ${selected.has(d.id)?'checked':''}> ${escapeHTML(d.label || d.model || 'Unnamed device')} ${d.mine?'· yours':''}</label>`).join('') || '<span class="muted">No devices in this environment.</span>';
+  $('#push-devices').innerHTML = eligibleDevices().map(d=>`<label><input type="checkbox" data-target="${escapeHTML(d.id)}" ${selected.has(d.id)?'checked':''}> ${escapeHTML(deviceTitle(d)+' · '+shortDeviceId(d))} ${d.mine?'· yours':''}</label>`).join('') || '<span class="muted">No devices in this environment.</span>';
   document.querySelectorAll('[data-target]').forEach(x=>x.onchange=audienceCount);
   audienceCount();
 }
@@ -58,12 +67,15 @@ function preview() {
 function renderDevices() {
   const devices = data.devices.filter(d=>(!$('#device-app').value || d.app_id===$('#device-app').value) && ($('#device-group').value!=='mine' || d.mine));
   $('#device-empty').hidden=devices.length>0;
-  $('#device-rows').innerHTML=devices.map(d=>`<tr><td>${escapeHTML(d.model || 'Apple device')}${d.enabled?'':' · disabled'}</td><td>${escapeHTML(data.apps.find(a=>a.id===d.app_id)?.name)}</td><td>${escapeHTML(d.environment)}</td><td>${escapeHTML(date(d.last_seen))}</td><td><input type="checkbox" aria-label="Mark ${escapeHTML(d.model)} as my device" data-mine="${escapeHTML(d.id)}" ${d.mine?'checked':''}></td><td><input type="text" maxlength="80" aria-label="Device label" data-label="${escapeHTML(d.id)}" value="${escapeHTML(d.label)}"></td></tr>`).join('');
-  document.querySelectorAll('[data-mine],[data-label]').forEach(el=>el.onchange=async()=>{
-    const id=el.dataset.mine || el.dataset.label; const device=data.devices.find(d=>d.id===id);
-    const body = el.dataset.mine ? {mine:el.checked} : {label:el.value};
-    try { await api('/api/devices/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify(body)}); Object.assign(device,body); updateAudience(); notice('Device updated.'); }
-    catch(e) { notice(e.message); renderDevices(); }
+  $('#device-rows').innerHTML=devices.map(d=>`<tr><td><strong>${escapeHTML(deviceTitle(d))}</strong><small class="device-detail">${escapeHTML(deviceMake(d))}${d.model && d.model!==deviceMake(d)?' · '+escapeHTML(d.model):''}</small>${d.enabled?'':`<small class="device-detail">${d.notification_status==='denied'?'Notifications denied':d.notification_status==='notDetermined'?'Notifications not enabled':'Push inactive'}</small>`}</td><td>${escapeHTML(data.apps.find(a=>a.id===d.app_id)?.name)}${d.app_version?`<small class="device-detail">v${escapeHTML(d.app_version)}</small>`:''}</td><td>${d.environment==='production'?'Production':'Sandbox'}</td><td class="identifier-cell"><small>${d.identifier_kind==='idfv'?'Vendor ID (IDFV)':d.identifier_kind==='installation'?'Installation ID':'App device ID'}</small><code>${escapeHTML(d.source_identifier || d.id)}</code><label class="udid-label">Hardware UDID<input type="text" maxlength="64" aria-label="Hardware UDID for ${escapeHTML(deviceTitle(d))}" data-udid="${escapeHTML(d.id)}" value="${escapeHTML(d.hardware_udid)}" placeholder="Add from Xcode or Finder"></label></td><td>${escapeHTML(date(d.last_seen))}</td><td><input type="checkbox" aria-label="Mark ${escapeHTML(deviceTitle(d))} as my device" data-mine="${escapeHTML(d.id)}" ${d.mine?'checked':''}></td><td><input type="text" maxlength="80" aria-label="Nickname for ${escapeHTML(deviceTitle(d))}" data-label="${escapeHTML(d.id)}" value="${escapeHTML(d.label)}" placeholder="e.g. Nathan’s iPhone"></td></tr>`).join('');
+  document.querySelectorAll('[data-mine],[data-label],[data-udid]').forEach(el=>{
+    el.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();el.blur();}};
+    el.onchange=async()=>{
+      const id=el.dataset.mine || el.dataset.label || el.dataset.udid; const device=data.devices.find(d=>d.id===id);
+      const body = el.dataset.mine ? {mine:el.checked} : el.dataset.udid ? {hardwareUdid:el.value.trim()} : {label:el.value.trim()};
+      try { await api('/api/devices/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify(body)}); Object.assign(device,el.dataset.udid?{hardware_udid:body.hardwareUdid}:body); renderDevices();updateAudience();notice('Device details saved.'); }
+      catch(e) { notice(e.message); renderDevices(); }
+    };
   });
 }
 function render() {

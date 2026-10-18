@@ -53,7 +53,7 @@ async function oauth(request,env,path){
 async function overview(env){
   const [apps,devices,daily,history,count]=await Promise.all([
     env.DB.prepare("SELECT a.*, (SELECT COUNT(*) FROM devices d WHERE d.app_id=a.id AND d.enabled=1) AS devices,(SELECT COUNT(DISTINCT installation_id) FROM events e WHERE e.app_id=a.id AND julianday(e.created_at)>=julianday('now','-7 days')) AS active FROM apps a ORDER BY name COLLATE NOCASE").all(),
-    env.DB.prepare('SELECT id,app_id,environment,model,label,mine,enabled,last_seen FROM devices ORDER BY last_seen DESC LIMIT 10000').all(),
+    env.DB.prepare('SELECT id,app_id,environment,model,label,mine,enabled,last_seen,source_identifier,identifier_kind,hardware_udid,device_name,notification_status,app_version FROM devices ORDER BY last_seen DESC LIMIT 10000').all(),
     env.DB.prepare("SELECT substr(created_at,1,10) AS day,COUNT(*) AS count FROM events WHERE julianday(created_at)>=julianday('now','-7 days') GROUP BY day ORDER BY day").all(),
     env.DB.prepare('SELECT * FROM sends ORDER BY created_at DESC LIMIT 100').all(),
     env.DB.prepare("SELECT COALESCE(SUM(accepted),0) AS count FROM sends WHERE julianday(created_at)>=julianday('now','-7 days')").first()
@@ -130,24 +130,68 @@ async function ingest(request,env){
   if(!env.INGEST_SECRET||request.headers.get('Authorization')!=='Bearer '+env.INGEST_SECRET)fail('Permission denied',403);
   const input=await body(request);const app=await env.DB.prepare('SELECT id FROM apps WHERE id=?').bind(input.appId||'').first();if(!app)fail('Unknown app');
   if(input.type==='deviceRemoved'){
-    if(typeof input.id!=='string'||input.id.length>100)fail('Invalid device ID');
-    await env.DB.prepare('UPDATE devices SET enabled=0 WHERE id=? AND app_id=?').bind(input.id,app.id).run();
+    if(input.sourceIdentifier!==undefined){
+      if(typeof input.sourceIdentifier!=='string'||input.sourceIdentifier.length>128||!['development','production'].includes(input.environment))fail('Invalid source device');
+      await env.DB.prepare('UPDATE devices SET enabled=0 WHERE source_identifier=? AND environment=? AND app_id=?').bind(input.sourceIdentifier,input.environment,app.id).run();
+    }else{
+      if(typeof input.id!=='string'||input.id.length>100)fail('Invalid device ID');
+      const device=await env.DB.prepare('SELECT token,environment FROM devices WHERE id=? AND app_id=?').bind(input.id,app.id).first();
+      if(device&&await digest(app.id+':'+device.environment+':'+device.token)===input.id)await env.DB.prepare('UPDATE devices SET enabled=0 WHERE id=? AND app_id=?').bind(input.id,app.id).run();
+    }
   }else if(input.type==='status'){
     // A successful authoritative backend sync may contain zero devices.
   }else if(input.type==='device'){
     if(typeof input.token!=='string'||!/^([a-f0-9]{2}){16,256}$/i.test(input.token)||!['development','production'].includes(input.environment)||typeof input.model!=='string'||input.model.length>80)fail('Invalid device');
-    const id=await digest(app.id+':'+input.environment+':'+input.token.toLowerCase());
+    let id=await digest(app.id+':'+input.environment+':'+input.token.toLowerCase());
+    if(input.sourceIdentifier){
+      const existing=await env.DB.prepare('SELECT id FROM devices WHERE app_id=? AND environment=? AND source_identifier=?').bind(app.id,input.environment,input.sourceIdentifier).first();
+      if(existing)id=existing.id;
+    }
     const lastSeenAt=trustedTimestamp(input.lastSeenAt);
-    await env.DB.prepare('INSERT INTO devices(id,app_id,token,environment,model,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(app_id,token,environment) DO UPDATE SET model=excluded.model,last_seen=excluded.last_seen,enabled=CASE WHEN ? THEN 1 ELSE devices.enabled END').bind(id,app.id,input.token.toLowerCase(),input.environment,input.model,lastSeenAt,input.reactivate===true?1:0).run();
+    if(input.sourceIdentifier!==undefined&&(typeof input.sourceIdentifier!=='string'||input.sourceIdentifier.length>128))fail('Invalid source identifier');
+    if(input.deviceName!==undefined&&(typeof input.deviceName!=='string'||input.deviceName.length>100))fail('Invalid device name');
+    await env.DB.prepare('INSERT INTO devices(id,app_id,token,environment,model,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,model=excluded.model,last_seen=excluded.last_seen,enabled=CASE WHEN ? THEN 1 ELSE devices.enabled END').bind(id,app.id,input.token.toLowerCase(),input.environment,input.model,lastSeenAt,input.reactivate===true?1:0).run();
+    if(input.sourceIdentifier!==undefined)await env.DB.prepare('UPDATE devices SET source_identifier=? WHERE id=?').bind(input.sourceIdentifier,id).run();
+    if(input.deviceName!==undefined)await env.DB.prepare('UPDATE devices SET device_name=? WHERE id=?').bind(input.deviceName,id).run();
   }else if(input.type==='event'){
     if(typeof input.id!=='string'||input.id.length>100||!input.id||typeof input.installationId!=='string'||!input.installationId||input.installationId.length>100||typeof input.name!=='string'||!input.name||input.name.length>80)fail('Invalid event');
     await env.DB.prepare('INSERT OR IGNORE INTO events(id,app_id,installation_id,name,created_at) VALUES(?,?,?,?,?)').bind(app.id+':'+input.id,app.id,input.installationId,input.name,trustedTimestamp(input.occurredAt)).run();
   }else fail('Invalid ingestion type');
   await env.DB.prepare('UPDATE apps SET connected=1 WHERE id=?').bind(app.id).run();return json({ok:true});
 }
+
+async function registerSuuBoard(request,env){
+  if(!env.CLIENT_REGISTRATION_LIMITER)fail('Device registration is not configured',503);
+  const origin=request.headers.get('Origin');if(origin&&origin!==env.FRONTEND_ORIGIN)fail('Permission denied',403);
+  const limit=await env.CLIENT_REGISTRATION_LIMITER.limit({key:'suuboard:ip:'+(request.headers.get('CF-Connecting-IP')||'unknown')});
+  if(!limit.success)fail('Too many registration requests. Try again later.',429);
+  const input=await body(request);
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!uuid.test(input.installationId||'')||typeof input.secret!=='string'||! /^[a-zA-Z0-9_-]{43,128}$/.test(input.secret))fail('Invalid installation credentials');
+  const deviceLimit=await env.CLIENT_REGISTRATION_LIMITER.limit({key:'suuboard:installation:'+input.installationId});
+  if(!deviceLimit.success)fail('Too many registration requests. Try again later.',429);
+  if(!['development','production'].includes(input.environment)||typeof input.model!=='string'||!input.model||input.model.length>80||typeof input.deviceName!=='string'||input.deviceName.length>100||typeof input.appVersion!=='string'||input.appVersion.length>40||!['authorized','provisional','ephemeral','denied','notDetermined'].includes(input.notificationStatus))fail('Invalid device metadata');
+  if(input.vendorId!==null&&input.vendorId!==undefined&&!uuid.test(input.vendorId))fail('Invalid vendor identifier');
+  if(input.token!==null&&input.token!==undefined&&(typeof input.token!=='string'||!/^([a-f0-9]{2}){16,256}$/i.test(input.token)))fail('Invalid APNs token');
+  const installation=input.installationId.toLowerCase(),secretHash=await digest(input.secret);
+  await env.DB.prepare('INSERT OR IGNORE INTO client_installations(app_id,installation_id,secret_hash) VALUES(?,?,?)').bind('suuboard',installation,secretHash).run();
+  const enrollment=await env.DB.prepare('SELECT secret_hash FROM client_installations WHERE app_id=? AND installation_id=?').bind('suuboard',installation).first();
+  if(!enrollment||enrollment.secret_hash!==secretHash)fail('Permission denied',403);
+  const id=await digest('client:suuboard:'+installation),stamp=new Date().toISOString();
+  const token=input.token?.toLowerCase()||'unregistered:'+installation;
+  const permitted=['authorized','provisional','ephemeral'].includes(input.notificationStatus);
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO devices(id,app_id,token,environment,model,device_name,source_identifier,identifier_kind,notification_status,app_version,enabled,last_seen) VALUES(?,'suuboard',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,environment=excluded.environment,model=excluded.model,device_name=excluded.device_name,source_identifier=excluded.source_identifier,identifier_kind=excluded.identifier_kind,notification_status=excluded.notification_status,app_version=excluded.app_version,last_seen=excluded.last_seen,enabled=CASE WHEN excluded.token<>devices.token THEN excluded.enabled WHEN excluded.notification_status IN ('denied','notDetermined') THEN 0 ELSE devices.enabled END").bind(id,token,input.environment,input.model,input.deviceName,input.vendorId||installation,input.vendorId?'idfv':'installation',input.notificationStatus,input.appVersion,input.token&&permitted?1:0,stamp),
+    env.DB.prepare('INSERT OR IGNORE INTO events(id,app_id,installation_id,name,created_at) VALUES(?,?,?,?,?)').bind('client:suuboard:'+installation+':'+stamp.slice(0,10),'suuboard',installation,'app_active_daily',stamp),
+    env.DB.prepare("UPDATE apps SET connected=1 WHERE id='suuboard'")
+  ]);
+  return json({ok:true}); // Never return owner data, tokens, or other installations.
+}
+
 async function handle(request,env){
   const path=new URL(request.url).pathname;
   if(path==='/health')return json({ok:true,authConfigured:Boolean(env.DISCORD_CLIENT_ID&&env.DISCORD_CLIENT_SECRET),pushConfigured:Boolean(env.APNS_CREDENTIALS||(env.APNS_KEY_ID&&env.APNS_TEAM_ID&&env.APNS_PRIVATE_KEY))});
+  if(path==='/client/suuboard/register'&&request.method==='POST')return registerSuuBoard(request,env);
   if(path==='/ingest'&&request.method==='POST')return ingest(request,env);
   if(request.method==='GET'&&['/auth/discord','/auth/callback'].includes(path))return oauth(request,env,path);
   if(request.method!=='GET'&&request.headers.get('Origin')!==env.FRONTEND_ORIGIN)fail('Permission denied',403);
@@ -160,6 +204,8 @@ async function handle(request,env){
   if(path==='/api/push'&&request.method==='POST')return push(request,env);
   if(path.startsWith('/api/devices/')&&request.method==='PATCH'){
     const input=await body(request),id=decodeURIComponent(path.slice('/api/devices/'.length));
+    const existing=await env.DB.prepare('SELECT id FROM devices WHERE id=?').bind(id).first();if(!existing)fail('Device not found',404);
+    if(input.hardwareUdid!==undefined){if(typeof input.hardwareUdid!=='string'||(input.hardwareUdid!==''&&!/^[a-zA-Z0-9-]{8,64}$/.test(input.hardwareUdid)))fail('Enter a valid hardware UDID');await env.DB.prepare('UPDATE devices SET hardware_udid=? WHERE id=?').bind(input.hardwareUdid,id).run();}
     if(input.mine!==undefined){if(typeof input.mine!=='boolean')fail('Invalid device flag');await env.DB.prepare('UPDATE devices SET mine=? WHERE id=?').bind(input.mine?1:0,id).run();}
     if(input.label!==undefined){if(typeof input.label!=='string'||input.label.length>80)fail('Invalid label');await env.DB.prepare('UPDATE devices SET label=? WHERE id=?').bind(input.label,id).run();}
     return json({ok:true});

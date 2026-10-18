@@ -53,3 +53,17 @@ The browser splits large reviewed audiences into batches of 40 to respect the Wo
 The bridge samples backend last-seen timestamps; graph counts are activity samples, **not total app opens**. It preserves historical times and does not count imports as new activity. Apps without an existing data integration remain explicitly disconnected. The first bridge version supports Keyra and Neighbourhood; other catalogue entries need app-specific integrations.
 
 The Mac SSH alias is `nitratehub-vps`, using `~/.ssh/id_ed25519_nitratehub`. Password login was not disabled.
+
+## Device names, nicknames and identifiers
+
+The Devices page displays a nickname first, then the reported device name/model. Nicknames are owner-only and saved automatically on blur or Enter. They are used in the push audience picker. The bridge imports the source application’s device ID separately from its push token, and preserves the owner nickname and manually entered hardware UDID when APNs tokens rotate.
+
+Hardware UDIDs are not available to normal iOS/TestFlight applications. The hardware-UDID field is for an owner-supplied value from Xcode/Finder. Source backend IDs and IDFV are labelled accurately and never presented as hardware UDIDs.
+
+## SuuBoard native registration (build 8+)
+
+Older SuuBoard builds have no telemetry or APNs registration, so their TestFlight testers cannot appear retrospectively. The updated app registers on foreground launch through `/client/suuboard/register`, including production for release/TestFlight, model/name, IDFV when available, app version and notification permission. Installs without notification permission still appear but cannot receive pushes. Simulators skip registration.
+
+Enrollment uses a unique random installation secret stored in the device-only Keychain. It is stored as a hash on the server, and authorizes only that installation’s own metadata and token updates. No global backend or Discord credentials are shipped. Registration is rate limited, fixed to SuuBoard, and never sends notifications. It does not attest that client telemetry is genuine; treat metrics as first-party client-reported activity. Owner API access remains protected by Discord. Update App Store privacy disclosures for device identifiers / first-party analytics before distribution.
+
+New installations must install and open the updated build. APNs must be enabled for the app identifier, and a valid signed push entitlement must be present. Automatic new-sound broadcasting is a separate server integration; no public registration request triggers a push.
